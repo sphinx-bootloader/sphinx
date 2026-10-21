@@ -1,2 +1,4 @@
 obj/
 build/
+edk2-ovmf-bins/
+.clangd
