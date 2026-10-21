@@ -1,24 +1,24 @@
 #include <efi.h>
+#include <efilib.h>
+#include <file.h>
 
 /*
  * Entry point to sphinx bootloader
  */
 EFI_STATUS
 EFIAPI
-efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
+efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
+    InitializeLib(ImageHandle, SystemTable);
+
     /*
-     * Check that we got a system table
+     * Initialise the file manager
      */
-    if (!SystemTable || !ImageHandle)
-    {
-        return EFI_INVALID_PARAMETER;
+    EFI_STATUS Status = InitialiseFiles(ImageHandle);
+    if (EFI_ERROR(Status)) {
+        Print(L"Failed to initialise filesystem: %r\r\n", Status);
+        return Status;
     }
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Hello, World! from sphinx bootloader\r\n");
-
-    /*
-     * Return successfully, kernel finished execution
-     */
     return EFI_SUCCESS;
 }
