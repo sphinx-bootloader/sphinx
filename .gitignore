@@ -2,3 +2,4 @@ obj/
 build/
 edk2-ovmf-bins/
 .clangd
+src/parser.c

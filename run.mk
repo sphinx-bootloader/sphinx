@@ -7,6 +7,10 @@ VARS := build/ovmf-vars.fd
 TARGET := build/BOOTX64.EFI
 EFI_APP := BOOTX64.EFI
 
+KERNEL_DIR := test_kernel
+KERNEL_BIN := $(KERNEL_DIR)/build/kernel.elf
+KERNEL_DEST := DiskLayout/boot/kernel
+
 QEMU := qemu-system-x86_64
 QEMU_ARGS := -machine q35 -cpu qemu64
 
@@ -15,9 +19,14 @@ VARS_TEMPLATE := edk2-ovmf-bins/ovmf-vars-x86_64.fd
 
 comma := ,
 
-.PHONY: run disk clean-disk
+.PHONY: run disk kernel clean-disk
 
-disk: $(TARGET)
+kernel:
+	$(MAKE) -C $(KERNEL_DIR)
+	mkdir -p $(dir $(KERNEL_DEST))
+	cp "$(KERNEL_BIN)" "$(KERNEL_DEST)"
+
+disk: kernel $(TARGET)
 	@test -f "$(FIRMWARE)" || { echo "Missing firmware: $(FIRMWARE)"; exit 1; }
 	@command -v mkfs.vfat >/dev/null || { echo "Install dosfstools"; exit 1; }
 	@command -v mcopy >/dev/null || { echo "Install mtools"; exit 1; }
@@ -43,7 +52,7 @@ run: disk
 	    -device ich9-ahci,id=sata \
 	    -device ide-hd,drive=esp,bus=sata.0,bootindex=1 \
 	    -boot order=c \
-	    -nic none 
+	    -nic none
 
 clean-disk:
 	rm -f "$(DISK)" "$(VARS)"

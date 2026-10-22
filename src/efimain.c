@@ -40,6 +40,11 @@ EFI_STATUS CHAR8_to_CHAR16(IN CHAR8* src, OUT CHAR16** out)
     return EFI_SUCCESS;
 }
 
+void test_print(char* msg)
+{
+    Print(L"%a", msg);
+}
+
 /*
  * Entry point to sphinx bootloader
  */
@@ -126,6 +131,11 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     }
 
     /*
+     * No need for the config file handle anymore
+     */
+    FileClose(ConfigFileHandle);
+
+    /*
      * Get path of kernel executable
      * KERNEL=<PATH>
      */
@@ -135,8 +145,74 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
         Print(L"KERNEL is not set in configurations.cfg\r\n");
         return EFI_NOT_FOUND;
     }
-
     Print(L"Loading kernel at: %s\r\n", name);
 
-    return EFI_SUCCESS;
+    /*
+     * Now open the executable file
+     */
+    EFI_FILE_HANDLE ExecutableFileHandle;
+
+    Status = FileOpen(name, EFI_FILE_MODE_READ, 0, &ExecutableFileHandle);
+    if (EFI_ERROR(Status))
+    {
+        Print(L"Failed to open kernel file: %r\r\n", Status);
+        return Status;
+    }
+
+    /*
+     * Get size, needed for LoadELF
+     */
+    INTN exec_size = FileSize(ExecutableFileHandle);
+    if (exec_size == -1)
+    {
+        Print(L"Failed to get executable size\r\n");
+        return EFI_NOT_FOUND;
+    }
+
+    /*
+     * Read contents
+     */
+    void* exec_data = AllocatePool(exec_size);
+    if (!exec_data)
+    {
+        Print(L"Failed to allocate memory: %r\r\n", EFI_OUT_OF_RESOURCES);
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    Status = FileRead(ExecutableFileHandle, &exec_size, exec_data);
+    if (EFI_ERROR(Status))
+    {
+        Print(L"Failed to read executable: %r\r\n", Status);
+        return Status;
+    }
+
+    /*
+     * Close it, it's been read
+     */
+    FileClose(ExecutableFileHandle);
+
+    /*
+     * Create the ELF image
+     */
+    elf_image image;
+    Status = LoadELF(exec_data, exec_size, &image);
+    if (EFI_ERROR(Status))
+    {
+        Print(L"Failed to load executable into memory: %r\r\n", Status);
+        return Status;
+    }
+
+    /*
+     * And finally, run the kernel
+     */
+    Print(L"[BOOT] ELF loaded successfully\r\n");
+    Print(L"[BOOT] Entry virtual address: 0x%lx\r\n", image.entry);
+
+    Status = RunELF(ImageHandle, &image, NULL);
+
+    Print(L"[BOOT] RunELF returned: %r\r\n", Status);
+
+    UnloadELF(&image);
+
+    return Status;
 }

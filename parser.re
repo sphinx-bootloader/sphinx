@@ -95,6 +95,12 @@ EFI_STATUS config_next(lexer* lx, config_pair* out)
         return EFI_LOAD_ERROR;
     }
 
+    if (tk.id == TK_STR_LIT)
+    {
+        tk.start += 1;
+        tk.len -= 2;
+    }
+
     if (copy_tok(out->value, CFG_VAL_MAX, &tk) != EFI_SUCCESS)
     {
         return EFI_LOAD_ERROR;

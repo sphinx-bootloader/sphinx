@@ -34,4 +34,4 @@ EFI_STATUS UnloadELF(elf_image* image);
 /*
  * Exit boot services and jump to the image entry point
  */
-EFI_STATUS RunELF(EFI_HANDLE ImageHandle, elf_image* image);
+EFI_STATUS RunELF(EFI_HANDLE ImageHandle, elf_image* image, void* argument);

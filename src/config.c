@@ -1,7 +1,6 @@
 #include <efi.h>
 #include <efilib.h>
 #include <config.h>
-#include <debug.h>
 #include <parser.h>
 
 typedef struct _kvc

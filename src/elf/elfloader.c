@@ -22,6 +22,9 @@ int memcmp(const void* a, const void* b, size_t s)
     return 0;
 }
 
+#define KERNEL_BASE 0xFFFFFFFF80000000ULL
+#define KERNEL_STACK_PAGES 16
+
 /*
  * Check ELF file header
  */
@@ -58,7 +61,7 @@ static EFI_STATUS check_file(const Elf64_Ehdr* elfhdr)
         return EFI_UNSUPPORTED;
     }
 
-    if (elfhdr->e_type != ET_EXEC && elfhdr->e_type != ET_DYN)
+    if (elfhdr->e_type != ET_EXEC)
     {
         Print(L"ELF Load Error: Unsupported ELF type\r\n");
         return EFI_UNSUPPORTED;
@@ -72,10 +75,9 @@ static EFI_STATUS check_file(const Elf64_Ehdr* elfhdr)
  * actually sits in memory
  *
  * The ELF file says where each segment should live (p_vaddr), but UEFI
- * gave us whatever free pages it had, so each segment is at a different
- * physical address (paddr), this finds the segment that contains vaddr,
- * works out how far into the segment it is, and adds that offset to the
- * segment's physical base
+ * gave us a physical allocation for the entire image, this finds the
+ * segment that contains vaddr, works out how far into the segment it is,
+ * and adds that offset to the image's physical base
  *
  * size is how many bytes the caller needs starting at vaddr The whole
  * range must fit inside the segment, otherwise we would return a pointer
@@ -98,110 +100,6 @@ static uint8_t* resolve_vaddr(elf_image* image, UINT64 vaddr, UINT64 size)
     }
 
     return NULL;
-}
-
-/*
- * Fix up pointers inside the loaded image
- *
- * The compiler doesn't know where the program will be loaded, so any
- * absolute address stored in the data (for example a pointer in a global
- * variable) is written as if the program lived at its link-time address
- * Those values are wrong for the copy we made, so the linker lists them in
- * a relocation table and we rewrite each one
- *
- * The steps are:
- *   1. Find the PT_DYNAMIC segment, it holds tags that describe the
- *      tables, including where the relocation table is
- *   2. Read DT_RELA (table address), DT_RELASZ (total size) and
- *      DT_RELAENT (size of one entry) from those tags
- *   3. For each entry, R_X86_64_RELATIVE means "store a value at r_offset"
- *      The value is r_addend, the link-time address of the target, writing
- *      it into the loaded copy makes the pointer valid only if that address
- *      is mapped, which is why RunELF needs paging or identity mapping
- *
- * If the image has no PT_DYNAMIC or no relocation table, there is nothing
- * to fix and we return success
- */
-static EFI_STATUS apply_relocations(elf_image* image,
-    const Elf64_Phdr* phdrs, UINTN phnum)
-{
-    const Elf64_Dyn* dyn = NULL;
-    UINTN dyn_count = 0;
-    UINT64 rela_vaddr = 0;
-    UINT64 rela_size = 0;
-    UINT64 rela_ent = sizeof(Elf64_Rela);
-
-    for (UINTN i = 0; i < phnum; i++)
-    {
-        if (phdrs[i].p_type == PT_DYNAMIC)
-        {
-            dyn = (const Elf64_Dyn*)resolve_vaddr(image,
-                phdrs[i].p_vaddr, phdrs[i].p_memsz);
-            dyn_count = phdrs[i].p_memsz / sizeof(Elf64_Dyn);
-            break;
-        }
-    }
-
-    if (dyn == NULL)
-    {
-        return EFI_SUCCESS;
-    }
-
-    for (UINTN i = 0; i < dyn_count && dyn[i].d_tag != DT_NULL; i++)
-    {
-        switch (dyn[i].d_tag)
-        {
-        case DT_RELA:
-            rela_vaddr = dyn[i].d_un.d_ptr;
-            break;
-        case DT_RELASZ:
-            rela_size = dyn[i].d_un.d_val;
-            break;
-        case DT_RELAENT:
-            rela_ent = dyn[i].d_un.d_val;
-            break;
-        }
-    }
-
-    if (rela_vaddr == 0)
-    {
-        return EFI_SUCCESS;
-    }
-
-    if (rela_ent != sizeof(Elf64_Rela))
-    {
-        Print(L"ELF Load Error: Unexpected relocation entry size\r\n");
-        return EFI_LOAD_ERROR;
-    }
-
-    const Elf64_Rela* rela =
-        (const Elf64_Rela*)resolve_vaddr(image, rela_vaddr, rela_size);
-    if (rela == NULL)
-    {
-        Print(L"ELF Load Error: Relocation table out of bounds\r\n");
-        return EFI_LOAD_ERROR;
-    }
-
-    for (UINT64 i = 0; i < rela_size / sizeof(Elf64_Rela); i++)
-    {
-        if (ELF64_R_TYPE(rela[i].r_info) != R_X86_64_RELATIVE)
-        {
-            Print(L"ELF Load Error: Unsupported relocation type\r\n");
-            return EFI_UNSUPPORTED;
-        }
-
-        UINT64* target = (UINT64*)resolve_vaddr(image,
-            rela[i].r_offset, sizeof(UINT64));
-        if (target == NULL)
-        {
-            Print(L"ELF Load Error: Relocation target out of bounds\r\n");
-            return EFI_LOAD_ERROR;
-        }
-
-        *target = rela[i].r_addend;
-    }
-
-    return EFI_SUCCESS;
 }
 
 /*
@@ -243,78 +141,138 @@ EFI_STATUS LoadELF(void* FileData, UINTN FileSize, elf_image* image)
     const uint8_t* file = FileData;
     const Elf64_Phdr* phdrs = (const Elf64_Phdr*)(file + elfhdr->e_phoff);
 
-    image->entry = elfhdr->e_entry;
+    UINT64 image_start = KERNEL_BASE;
+    UINT64 image_end = KERNEL_BASE;
+    UINTN load_count = 0;
+
+    image->entry = 0;
     image->mapping_count = 0;
 
+    /*
+     * Find the complete virtual address range of the kernel
+     */
     for (UINTN i = 0; i < elfhdr->e_phnum; i++)
     {
         const Elf64_Phdr* phdr = &phdrs[i];
 
-        if (phdr->p_type != PT_LOAD)
+        if (phdr->p_type != PT_LOAD || phdr->p_memsz == 0)
         {
             continue;
         }
 
         if (phdr->p_filesz > phdr->p_memsz ||
             phdr->p_offset > FileSize ||
-            phdr->p_filesz > FileSize - phdr->p_offset)
+            phdr->p_filesz > FileSize - phdr->p_offset ||
+            phdr->p_vaddr < KERNEL_BASE ||
+            phdr->p_memsz > UINT64_MAX - phdr->p_vaddr)
         {
             Print(L"ELF Load Error: Invalid load segment\r\n");
-            status = EFI_LOAD_ERROR;
-            goto fail;
+            return EFI_LOAD_ERROR;
         }
 
-        if (phdr->p_memsz == 0)
+        if (phdr->p_align > 1 &&
+            ((phdr->p_align & (phdr->p_align - 1)) != 0 ||
+             (phdr->p_vaddr % phdr->p_align) !=
+             (phdr->p_offset % phdr->p_align)))
+        {
+            Print(L"ELF Load Error: Invalid segment alignment\r\n");
+            return EFI_LOAD_ERROR;
+        }
+
+        if (phdr->p_vaddr + phdr->p_memsz > image_end)
+        {
+            image_end = phdr->p_vaddr + phdr->p_memsz;
+        }
+
+        load_count++;
+    }
+
+    if (load_count == 0 || image_end <= image_start)
+    {
+        Print(L"ELF Load Error: No loadable segments\r\n");
+        return EFI_LOAD_ERROR;
+    }
+
+    /*
+     * Allocate memory for the complete kernel image and stack
+     */
+    UINT64 image_size = image_end - image_start;
+
+    if (image_size > UINT64_MAX - (EFI_PAGE_SIZE - 1))
+    {
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    UINTN image_pages = EFI_SIZE_TO_PAGES(image_size);
+
+    if (image_pages > ((UINTN)-1) - KERNEL_STACK_PAGES)
+    {
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    UINTN total_pages = image_pages + KERNEL_STACK_PAGES;
+    EFI_PHYSICAL_ADDRESS paddr = 0;
+
+    status = uefi_call_wrapper(BS->AllocatePages, 4,
+        AllocateAnyPages, EfiLoaderData, total_pages, &paddr);
+    if (EFI_ERROR(status))
+    {
+        Print(L"ELF Load Error: Failed to allocate kernel memory\r\n");
+        return status;
+    }
+
+    /*
+     * Clear the complete image so gaps between segments are zeroed
+     */
+    SetMem((void*)(UINTN)paddr, image_pages * EFI_PAGE_SIZE, 0);
+
+    /*
+     * Load each segment at its corresponding image offset
+     */
+    for (UINTN i = 0; i < elfhdr->e_phnum; i++)
+    {
+        const Elf64_Phdr* phdr = &phdrs[i];
+
+        if (phdr->p_type != PT_LOAD || phdr->p_memsz == 0)
         {
             continue;
         }
 
-        if (phdr->p_vaddr & (EFI_PAGE_SIZE - 1))
-        {
-            Print(L"ELF Load Error: Unaligned load segment\r\n");
-            status = EFI_LOAD_ERROR;
-            goto fail;
-        }
+        CopyMem(
+            (void*)(UINTN)(paddr + (phdr->p_vaddr - image_start)),
+            (void*)(file + phdr->p_offset),
+            phdr->p_filesz);
 
-        if (image->mapping_count >= MAX_LOAD_MAPPINGS)
-        {
-            Print(L"ELF Load Error: Too many load segments\r\n");
-            status = EFI_OUT_OF_RESOURCES;
-            goto fail;
-        }
-
-        UINTN pages = EFI_SIZE_TO_PAGES(phdr->p_memsz);
-        EFI_PHYSICAL_ADDRESS paddr = 0;
-
-        status = uefi_call_wrapper(BS->AllocatePages, 4,
-            AllocateAnyPages, EfiLoaderData, pages, &paddr);
-        if (EFI_ERROR(status))
-        {
-            Print(L"ELF Load Error: Failed to allocate segment memory\r\n");
-            goto fail;
-        }
-
-        CopyMem((void*)(UINTN)paddr, file + phdr->p_offset, phdr->p_filesz);
-        SetMem((void*)(UINTN)(paddr + phdr->p_filesz),
-            phdr->p_memsz - phdr->p_filesz, 0);
-
+        /*
+         * The image was cleared above, so BSS is already zeroed
+         */
         image->mappings[image->mapping_count].vaddr = phdr->p_vaddr;
-        image->mappings[image->mapping_count].paddr = paddr;
+        image->mappings[image->mapping_count].paddr =
+            paddr + (phdr->p_vaddr - image_start);
         image->mappings[image->mapping_count].memsz = phdr->p_memsz;
+
         image->mapping_count++;
     }
 
-    status = apply_relocations(image, phdrs, elfhdr->e_phnum);
-    if (EFI_ERROR(status))
-    {
-        goto fail;
-    }
+    /*
+     * Store the entry point
+     */
+    image->entry = elfhdr->e_entry;
+
+    /*
+     * Store the complete allocation in the first mapping
+     * so UnloadELF can free the image and stack together
+     */
+    image->mappings[0].vaddr = image_start;
+    image->mappings[0].paddr = paddr;
+    image->mappings[0].memsz = total_pages * EFI_PAGE_SIZE;
+
+    /*
+     * The allocation is contiguous, so only one mapping is needed
+     */
+    image->mapping_count = 1;
 
     return EFI_SUCCESS;
-
-fail:
-    UnloadELF(image);
-    return status;
 }
 
 /*
@@ -329,18 +287,12 @@ EFI_STATUS UnloadELF(elf_image* image)
 
     EFI_STATUS status = EFI_SUCCESS;
 
-    for (UINTN i = 0; i < image->mapping_count; i++)
+    if (image->mapping_count != 0)
     {
-        load_mapping* m = &image->mappings[i];
+        load_mapping* m = &image->mappings[0];
 
-        EFI_STATUS free_status =
-            uefi_call_wrapper(BS->FreePages, 2,
-                m->paddr, EFI_SIZE_TO_PAGES(m->memsz));
-
-        if (EFI_ERROR(free_status) && status == EFI_SUCCESS)
-        {
-            status = free_status;
-        }
+        status = uefi_call_wrapper(BS->FreePages, 2,
+            m->paddr, EFI_SIZE_TO_PAGES(m->memsz));
     }
 
     image->mapping_count = 0;
@@ -349,22 +301,35 @@ EFI_STATUS UnloadELF(elf_image* image)
     return status;
 }
 
+typedef void (__attribute__((sysv_abi)) *kernel_entry_t)(void *);
+
 /*
  * Exit boot services and jump to the image entry point
  */
-EFI_STATUS RunELF(EFI_HANDLE ImageHandle, elf_image* image)
+EFI_STATUS RunELF(EFI_HANDLE ImageHandle, elf_image* image, void* argument)
 {
-    if (image == NULL)
+    if (image == NULL || image->mapping_count == 0)
     {
         return EFI_INVALID_PARAMETER;
     }
 
-    uint8_t* entry = resolve_vaddr(image, image->entry, 1);
-    if (entry == NULL)
+    /*
+     * The first mapping contains the complete kernel allocation
+     */
+    load_mapping* m = &image->mappings[0];
+
+    UINT64 image_size = m->memsz -
+        KERNEL_STACK_PAGES * EFI_PAGE_SIZE;
+
+    UINT64 entry_offset = image->entry - KERNEL_BASE;
+
+    if (image->entry < KERNEL_BASE || entry_offset >= image_size)
     {
         Print(L"ELF Run Error: Entry point out of bounds\r\n");
         return EFI_LOAD_ERROR;
     }
+
+    UINT64 stack_top = KERNEL_BASE + m->memsz;
 
     UINTN map_size = 0;
     UINTN map_key = 0;
@@ -408,7 +373,22 @@ EFI_STATUS RunELF(EFI_HANDLE ImageHandle, elf_image* image)
         FreePool(map);
     }
 
-    ((void (*)(void))(UINTN)entry)();
+    /*
+     * Jump to the kernel with the stack immediately after the image
+     */
+    kernel_entry_t kernel = (kernel_entry_t)(UINTN)image->entry;
+
+    __asm__ __volatile__(
+        "mov %0, %%rsp\n"
+        "and $-16, %%rsp\n"
+        "xor %%rbp, %%rbp\n"
+        "mov %1, %%rdi\n"
+        "jmp *%2\n"
+        :
+        : "r"(stack_top), "r"(argument), "r"(kernel)
+        : "memory", "rdi");
+
+    __builtin_unreachable();
 
     return EFI_SUCCESS;
 }
