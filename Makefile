@@ -27,7 +27,7 @@ CFLAGS := --target=$(TRIPLE) \
     -fno-stack-protector \
     -fno-builtin \
     -mno-red-zone \
-    -DEFI_FUNCTION_WRAPPER \
+    -DGNU_EFI_USE_MS_ABI \
     -Wall -Wextra \
     -O2 -g \
     -Iinclude \
@@ -39,7 +39,7 @@ all: $(TARGET) edk2-ovmf-bins
 
 $(ELF_TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -znocombreloc \
+	$(LD) -nostdlib -znocombreloc -z defs \
 	    -T $(EFI_LDS) -shared -Bsymbolic \
 	    -L$(EFI_LIB) -L$(EFI_GNUEFI_LIB) \
 	    $(EFI_CRT) -o $@ $(OBJS) -lgnuefi -lefi

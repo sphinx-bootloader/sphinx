@@ -44,4 +44,4 @@ EFI_STATUS FileRead(IN EFI_FILE_HANDLE FileHandle, IN OUT UINTN* BufferSize, OUT
  * Returns -1 if failed
  * Otherwise returns file size (in bytes)
  */
-INT64 FileSize(EFI_FILE_HANDLE FileHandle);
+INTN FileSize(EFI_FILE_HANDLE FileHandle);

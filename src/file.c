@@ -7,40 +7,34 @@ EFI_FILE_HANDLE g_Volume;
  */
 EFI_FILE_HANDLE GetVolume(EFI_HANDLE ImageHandle)
 {
-    EFI_LOADED_IMAGE *LoadedImage = NULL;
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *IOVolume = NULL;
+    EFI_LOADED_IMAGE* LoadedImage = NULL;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL* IOVolume = NULL;
     EFI_FILE_HANDLE Volume = NULL;
 
     EFI_STATUS Status;
     EFI_GUID LipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
     EFI_GUID FsGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
 
-    Status = uefi_call_wrapper(
-        BS->HandleProtocol, 3,
-        ImageHandle, &LipGuid, (void **)&LoadedImage
-    );
-
+    Status = uefi_call_wrapper(BS->HandleProtocol, 3,
+        ImageHandle, &LipGuid, (void**)&LoadedImage);
     if (EFI_ERROR(Status))
     {
+        Print(L"GetVolume: loaded image: %r\r\n", Status);
         return NULL;
     }
 
-    Status = uefi_call_wrapper(
-        BS->HandleProtocol, 3,
-        LoadedImage->DeviceHandle, &FsGuid, (void **)&IOVolume
-    );
-
+    Status = uefi_call_wrapper(BS->HandleProtocol, 3,
+        LoadedImage->DeviceHandle, &FsGuid, (void**)&IOVolume);
     if (EFI_ERROR(Status))
     {
+        Print(L"GetVolume: file system protocol: %r\r\n", Status);
         return NULL;
     }
 
-    Status = uefi_call_wrapper(
-        IOVolume->OpenVolume, 2, IOVolume, &Volume
-    );
-
+    Status = uefi_call_wrapper(IOVolume->OpenVolume, 2, IOVolume, &Volume);
     if (EFI_ERROR(Status))
     {
+        Print(L"GetVolume: open volume: %r\r\n", Status);
         return NULL;
     }
 
@@ -110,7 +104,7 @@ EFI_STATUS FileRead(
 /*
  * Get file size, when it returns -1, this means operation failed
  */
-INT64 FileSize(EFI_FILE_HANDLE FileHandle)
+INTN FileSize(EFI_FILE_HANDLE FileHandle)
 {
     if (!FileHandle)
         return -1;
@@ -120,7 +114,7 @@ INT64 FileSize(EFI_FILE_HANDLE FileHandle)
     if (!FileInfo)
         return -1;
 
-    INT64 Size = (INT64)FileInfo->FileSize;
+    INTN Size = (INTN)FileInfo->FileSize;
     FreePool(FileInfo);
 
     return Size;
